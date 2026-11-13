@@ -52,7 +52,7 @@ func TestSelectDisks(t *testing.T) {
 
 func TestAggregateDisks(t *testing.T) {
 	targets := []diskTarget{{path: "bad"}, {path: "zero"}, {path: "one"}, {path: "alias"}, {path: "two"}, {path: "missing"}}
-	got := aggregateDisks(targets, func(path string) (*disk.UsageStat, error) {
+	got, breakdown := aggregateDisks(targets, func(path string) (*disk.UsageStat, error) {
 		if path == "bad" {
 			return nil, errors.New("unmounted")
 		}
@@ -71,6 +71,10 @@ func TestAggregateDisks(t *testing.T) {
 	})
 	if got != (capacity{Total: 200, Used: 80}) {
 		t.Fatalf("got %+v", got)
+	}
+	want := []diskCapacity{{Mount: "one", capacity: capacity{Used: 40, Total: 100}}, {Mount: "two", capacity: capacity{Used: 40, Total: 100}}}
+	if !reflect.DeepEqual(breakdown, want) {
+		t.Fatalf("breakdown = %+v, want %+v", breakdown, want)
 	}
 }
 

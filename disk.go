@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -18,6 +19,11 @@ func realFilesystem(fs string) bool {
 }
 
 type diskTarget struct{ path, device string }
+
+type diskCapacity struct {
+	Mount string `json:"mount"`
+	capacity
+}
 
 func selectDisks(partitions []disk.PartitionStat, paths string) []diskTarget {
 	var candidates []diskTarget
@@ -59,8 +65,9 @@ func selectDisks(partitions []disk.PartitionStat, paths string) []diskTarget {
 	return result
 }
 
-func aggregateDisks(targets []diskTarget, usage func(string) (*disk.UsageStat, error), device func(string) (uint64, error)) capacity {
+func aggregateDisks(targets []diskTarget, usage func(string) (*disk.UsageStat, error), device func(string) (uint64, error)) (capacity, []diskCapacity) {
 	var result capacity
+	var breakdown []diskCapacity
 	seen := map[uint64]bool{}
 	for _, target := range targets {
 		id, err := device(target.path)
@@ -74,20 +81,26 @@ func aggregateDisks(targets []diskTarget, usage func(string) (*disk.UsageStat, e
 		seen[id] = true
 		result.Total += u.Total
 		result.Used += u.Used
+		breakdown = append(breakdown, diskCapacity{Mount: target.path, capacity: capacity{Used: u.Used, Total: u.Total}})
 	}
-	return result
+	sort.Slice(breakdown, func(i, j int) bool { return breakdown[i].Mount < breakdown[j].Mount })
+	if len(breakdown) > 32 {
+		breakdown = breakdown[:32]
+	}
+	return result, breakdown
 }
 
-func collectDisks(ctx context.Context, paths string) (capacity, error) {
+func collectDisks(ctx context.Context, paths string) (capacity, []diskCapacity, error) {
 	partitions, err := disk.PartitionsWithContext(ctx, paths != "")
 	if err != nil {
-		return capacity{}, err
+		return capacity{}, nil, err
 	}
-	return aggregateDisks(selectDisks(partitions, paths), func(path string) (*disk.UsageStat, error) {
+	total, breakdown := aggregateDisks(selectDisks(partitions, paths), func(path string) (*disk.UsageStat, error) {
 		return disk.UsageWithContext(ctx, path)
 	}, func(path string) (uint64, error) {
 		var stat syscall.Stat_t
 		err := syscall.Stat(path, &stat)
 		return uint64(stat.Dev), err
-	}), nil
+	})
+	return total, breakdown, nil
 }

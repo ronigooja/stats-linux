@@ -30,6 +30,8 @@ When a publish fails or its acknowledgement times out, the agent exits instead o
 
 `disk` sums used/total bytes across physical filesystems returned by gopsutil, excluding pseudo/container filesystems such as tmpfs, overlay, squashfs, proc, sysfs, and cgroup. Bind mounts and btrfs subvolumes on the same device count once. Explicit paths bypass automatic filtering but remain device-de-duplicated. Inaccessible, failed, or zero-capacity filesystems are skipped; an empty selection reports zero capacity. The service sandbox may hide mounts, especially home directories and private temporary mounts.
 
+When filesystems are counted, `metrics` also includes `disks`: an array of objects containing only `mount`, `used_bytes`, and `total_bytes`, from the same collection pass as `disk`. Entries are sorted by mount path and limited to the first 32; `disk` still sums all counted filesystems. With `--disk-path`, `mount` contains the selected explicit path after device deduplication. When no filesystems are counted, `disks` is omitted. Mount paths are published to the MQTT broker, so broker readers can see them.
+
 ```sh
 stats-linux version
 stats-linux update --check

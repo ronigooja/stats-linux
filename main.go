@@ -35,14 +35,15 @@ type rates struct {
 	TX float64 `json:"tx_bytes_per_second"`
 }
 type metrics struct {
-	Version   int       `json:"version"`
-	Timestamp time.Time `json:"timestamp"`
-	CPU       float64   `json:"cpu_percent"`
-	Memory    capacity  `json:"memory"`
-	Disk      capacity  `json:"disk"`
-	Network   rates     `json:"network"`
-	Load      float64   `json:"load_1m"`
-	Uptime    uint64    `json:"uptime_seconds"`
+	Version   int            `json:"version"`
+	Timestamp time.Time      `json:"timestamp"`
+	CPU       float64        `json:"cpu_percent"`
+	Memory    capacity       `json:"memory"`
+	Disk      capacity       `json:"disk"`
+	Disks     []diskCapacity `json:"disks,omitempty"`
+	Network   rates          `json:"network"`
+	Load      float64        `json:"load_1m"`
+	Uptime    uint64         `json:"uptime_seconds"`
 }
 type counters struct {
 	rx, tx uint64
@@ -66,7 +67,7 @@ func collect(ctx context.Context, path string, previous counters) (metrics, coun
 	if err != nil {
 		return m, previous, fmt.Errorf("memory: %w", err)
 	}
-	d, err := collectDisks(ctx, path)
+	d, disks, err := collectDisks(ctx, path)
 	if err != nil {
 		return m, previous, fmt.Errorf("disk: %w", err)
 	}
@@ -84,7 +85,7 @@ func collect(ctx context.Context, path string, previous counters) (metrics, coun
 	}
 	now := time.Now().UTC()
 	current := counters{n[0].BytesRecv, n[0].BytesSent, now}
-	m = metrics{1, now, percent[0], capacity{vm.Used, vm.Total}, d, networkRates(previous, current), l.Load1, u}
+	m = metrics{1, now, percent[0], capacity{vm.Used, vm.Total}, d, disks, networkRates(previous, current), l.Load1, u}
 	return m, current, nil
 }
 
