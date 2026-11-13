@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 DynamicUser=true
-EnvironmentFile=/etc/stats-linux.env
+EnvironmentFile=/etc/stats-linux/config
 ExecStart=/usr/local/bin/stats-linux
 Restart=on-failure
 RestartSec=5s

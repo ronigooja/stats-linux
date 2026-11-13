@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build on Linux build machine
+        env:
+          BUILD_SSH_KEY: ${{ secrets.BUILD_SSH_KEY }}
+          BUILD_KNOWN_HOSTS: ${{ secrets.BUILD_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || exit 1
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$BUILD_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$BUILD_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          remote="/tmp/stats-linux-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'ssh root@64.118.141.231 "rm -rf -- $remote"; rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts' EXIT
+          ssh root@64.118.141.231 "mkdir -p $remote"
+          rsync -a --delete --exclude=.git ./ "root@64.118.141.231:$remote/"
+          ssh root@64.118.141.231 "export PATH=/root/Agents/environment/go-1.26.0/bin:\$PATH; cd $remote; set -eu; mkdir -p dist; for arch in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=\$arch go build -trimpath -ldflags '-s -w -X main.version=$GITHUB_REF_NAME' -o dist/stats-linux_linux_\$arch .; done; cd dist; sha256sum stats-linux_linux_* > sha256sums.txt" > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
+          mkdir -p dist
+          rsync -a "root@64.118.141.231:$remote/dist/" dist/
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/stats-linux_linux_amd64 dist/stats-linux_linux_arm64 dist/sha256sums.txt --verify-tag --generate-notes

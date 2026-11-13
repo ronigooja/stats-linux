@@ -6,19 +6,15 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -28,43 +24,6 @@ import (
 type config struct {
 	broker, deviceID, username, password, caFile, diskPath string
 	interval                                               time.Duration
-}
-
-func env(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func parseConfig() (config, error) {
-	var c config
-	flag.StringVar(&c.broker, "broker", env("STATS_BROKER", ""), "MQTT TLS broker URL (ssl://host:8883)")
-	flag.StringVar(&c.deviceID, "device-id", env("STATS_DEVICE_ID", ""), "unique MQTT topic segment")
-	flag.StringVar(&c.username, "username", env("STATS_USERNAME", ""), "MQTT username")
-	flag.StringVar(&c.password, "password", env("STATS_PASSWORD", ""), "MQTT password (prefer environment)")
-	flag.StringVar(&c.caFile, "ca-file", env("STATS_CA_FILE", ""), "additional PEM CA certificates")
-	flag.StringVar(&c.diskPath, "disk-path", env("STATS_DISK_PATH", "/"), "filesystem mount path")
-	defaultInterval, err := time.ParseDuration(env("STATS_INTERVAL", "30s"))
-	if err != nil {
-		return c, fmt.Errorf("STATS_INTERVAL: %w", err)
-	}
-	flag.DurationVar(&c.interval, "interval", defaultInterval, "metrics interval")
-	flag.Parse()
-	u, err := url.Parse(c.broker)
-	if err != nil || u.Scheme != "ssl" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return c, errors.New("broker must be an ssl://host:port URL without credentials or path")
-	}
-	if u.Port() == "" {
-		return c, errors.New("broker URL must include a port")
-	}
-	if c.deviceID == "" || strings.ContainsAny(c.deviceID, "/+#\x00") {
-		return c, errors.New("device-id must be a nonempty MQTT topic segment without /, +, or #")
-	}
-	if c.interval <= 0 {
-		return c, errors.New("interval must be positive")
-	}
-	return c, nil
 }
 
 type capacity struct {
@@ -107,7 +66,7 @@ func collect(ctx context.Context, path string, previous counters) (metrics, coun
 	if err != nil {
 		return m, previous, fmt.Errorf("memory: %w", err)
 	}
-	d, err := disk.UsageWithContext(ctx, path)
+	d, err := collectDisks(ctx, path)
 	if err != nil {
 		return m, previous, fmt.Errorf("disk: %w", err)
 	}
@@ -125,7 +84,7 @@ func collect(ctx context.Context, path string, previous counters) (metrics, coun
 	}
 	now := time.Now().UTC()
 	current := counters{n[0].BytesRecv, n[0].BytesSent, now}
-	m = metrics{1, now, percent[0], capacity{vm.Used, vm.Total}, capacity{d.Used, d.Total}, networkRates(previous, current), l.Load1, u}
+	m = metrics{1, now, percent[0], capacity{vm.Used, vm.Total}, d, networkRates(previous, current), l.Load1, u}
 	return m, current, nil
 }
 
@@ -260,11 +219,7 @@ func run(c config) error {
 }
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
-	c, err := parseConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
-	if err := run(c); err != nil {
+	if err := command(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
 }
