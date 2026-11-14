@@ -13,6 +13,7 @@ command -v sha256sum >/dev/null 2>&1 || { echo "sha256sum is required" >&2; exit
 
 tmp=$(mktemp -d)
 echo_disabled=0
+# shellcheck disable=SC2329 # Invoked indirectly by the exit trap.
 cleanup() {
     if [ "$echo_disabled" = 1 ]; then stty echo <&3 2>/dev/null || :; fi
     rm -rf "$tmp"
@@ -87,5 +88,38 @@ awk -v name="$asset" '$2 == name || $2 == "*" name { print }' "$tmp/sha256sums.t
 [ "$(wc -l < "$tmp/checksum" | tr -d ' ')" = 1 ] || { echo "Missing or duplicate release checksum" >&2; exit 1; }
 (cd "$tmp" && sha256sum --check checksum) >/dev/null || { echo "Release checksum verification failed" >&2; exit 1; }
 chmod 755 "$tmp/$asset"
+health_since=$(date '+%Y-%m-%d %H:%M:%S')
 # STATS_PASSWORD is inherited from the environment, never added to argv.
 STATS_PASSWORD=${STATS_PASSWORD:-} "$tmp/$asset" install "$@"
+
+if [ "${STATS_SKIP_HEALTHCHECK:-0}" = 1 ]; then exit 0; fi
+restarts=$(systemctl show -p NRestarts --value stats-linux 2>/dev/null || :)
+stable=0
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+    sleep 1
+    attempt=$((attempt + 1))
+    current=$(systemctl show -p NRestarts --value stats-linux 2>/dev/null || :)
+    if systemctl is-active --quiet stats-linux; then
+        if [ "$current" != "$restarts" ]; then stable=0; fi
+        stable=$((stable + 1))
+    else
+        stable=0
+    fi
+    restarts=$current
+    if [ "$stable" -ge 8 ]; then
+        # Go stderr can have informational journal priority; inspect text as well.
+        if journalctl -u stats-linux --since "$health_since" --no-pager -q > "$tmp/health-journal" 2>/dev/null &&
+            journalctl -u stats-linux --since "$health_since" -p err --no-pager -q > "$tmp/health-errors" 2>/dev/null &&
+            [ ! -s "$tmp/health-errors" ] &&
+            ! grep -Ei 'failed|failure|error|fatal|panic|rejected|timed out|not authorized|unavailable' "$tmp/health-journal" >/dev/null; then
+            echo "stats-linux is running"
+            exit 0
+        fi
+        break
+    fi
+done
+echo "stats-linux did not become healthy. Check journalctl -u stats-linux" >&2
+# Mask the remainder of any password-bearing line before printing diagnostics.
+journalctl -u stats-linux --no-pager -n 10 2>/dev/null | sed 's/[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd].*/password [REDACTED]/' >&2
+exit 1

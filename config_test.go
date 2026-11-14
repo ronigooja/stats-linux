@@ -5,7 +5,36 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestDefaultInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored string
+		want         time.Duration
+	}{
+		{"default", "", time.Minute},
+		{"existing config", "30s", 30 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := map[string]string{"STATS_BROKER": "ssl://host:8883", "STATS_DEVICE_ID": "host"}
+			if tc.stored != "" {
+				file["STATS_INTERVAL"] = tc.stored
+			}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			c := configFlags(fs, file, func(string) (string, bool) { return "", false })
+			if err := fs.Parse(nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := finishConfig(fs, c); err != nil {
+				t.Fatal(err)
+			}
+			if c.interval != tc.want {
+				t.Fatalf("interval = %v, want %v", c.interval, tc.want)
+			}
+		})
+	}
+}
 
 func TestSanitizeHostname(t *testing.T) {
 	for _, tc := range []struct{ name, input, want string }{

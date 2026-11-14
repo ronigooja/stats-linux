@@ -14,6 +14,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/eclipse/paho.mqtt.golang/packets"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
@@ -132,6 +133,61 @@ func announce(client publisher, base, name, platform string) error {
 	return publish(client, base+"status", map[string]bool{"online": true})
 }
 
+// mqttRefusalMessage returns only fixed text: broker errors must never leak credentials.
+func mqttRefusalMessage(err error) string {
+	for _, refusal := range []struct {
+		err     error
+		message string
+	}{
+		{packets.ErrorRefusedBadUsernameOrPassword, "MQTT broker rejected the username or password (check STATS_USERNAME / STATS_PASSWORD)"},
+		{packets.ErrorRefusedNotAuthorised, "MQTT broker rejected the client (not authorized)"},
+		{packets.ErrorRefusedIDRejected, "MQTT broker rejected the client identifier (check STATS_DEVICE_ID)"},
+		{packets.ErrorRefusedServerUnavailable, "MQTT broker is unavailable"},
+		{packets.ErrorRefusedBadProtocolVersion, "MQTT broker rejected the protocol version (MQTT 3.1.1 required)"},
+		{packets.ErrorProtocolViolation, "MQTT broker rejected the connection (protocol violation)"},
+	} {
+		if errors.Is(err, refusal.err) {
+			return refusal.message
+		}
+	}
+	return ""
+}
+
+func connectInitial(ctx context.Context, connect func() mqtt.Token, timeout, retry time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	for {
+		token := connect()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			// Prefer a refusal already reported at the deadline boundary.
+			if message := mqttRefusalMessage(token.Error()); message != "" {
+				return errors.New(message)
+			}
+			return errors.New("MQTT connection timed out")
+		case <-token.Done():
+		}
+		if token.Error() == nil {
+			return nil
+		}
+		if message := mqttRefusalMessage(token.Error()); message != "" {
+			return errors.New(message)
+		}
+		pause := time.NewTimer(retry)
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return ctx.Err()
+		case <-deadline.C:
+			pause.Stop()
+			return errors.New("MQTT connection timed out")
+		case <-pause.C:
+		}
+	}
+}
+
 func run(c config) error {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if c.caFile != "" {
@@ -160,7 +216,9 @@ func run(c config) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	connected := make(chan struct{}, 1)
-	opts := mqtt.NewClientOptions().AddBroker(c.broker).SetProtocolVersion(4).SetClientID("stats-"+c.deviceID).SetUsername(c.username).SetPassword(c.password).SetTLSConfig(tlsConfig).SetAutoReconnect(true).SetConnectRetry(true).SetConnectRetryInterval(5*time.Second).SetWriteTimeout(5*time.Second).SetWill(base+"status", `{"online":false}`, 1, true)
+	// Paho v1.5.0 hides initial CONNACK errors with ConnectRetry enabled.
+	// Retry initial network failures ourselves; retain automatic reconnect after success.
+	opts := mqtt.NewClientOptions().AddBroker(c.broker).SetProtocolVersion(4).SetClientID("stats-"+c.deviceID).SetUsername(c.username).SetPassword(c.password).SetTLSConfig(tlsConfig).SetAutoReconnect(true).SetConnectRetry(false).SetWriteTimeout(5*time.Second).SetWill(base+"status", `{"online":false}`, 1, true)
 	opts.SetOnConnectHandler(func(mqtt.Client) {
 		// Paho runs callbacks concurrently, including during shutdown. Never
 		// publish here; coalesce notifications for the sole publishing loop.
@@ -170,18 +228,8 @@ func run(c config) error {
 		}
 	})
 	client := mqtt.NewClient(opts)
-	token := client.Connect()
-	timeout := time.NewTimer(30 * time.Second)
-	defer timeout.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err() // Exit without DISCONNECT; a concurrent connection may have a will.
-	case <-timeout.C:
-		return errors.New("MQTT connection timed out")
-	case <-token.Done():
-	}
-	if err := token.Error(); err != nil {
-		return fmt.Errorf("MQTT connect: %w", err)
+	if err := connectInitial(ctx, client.Connect, 30*time.Second, 5*time.Second); err != nil {
+		return err // Exit without DISCONNECT; a concurrent connection may have a will.
 	}
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()

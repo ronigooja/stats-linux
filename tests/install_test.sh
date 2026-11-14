@@ -35,11 +35,38 @@ cat > "$tmp/fake-binary" <<'EOF'
 printf '%s\n' "$@" > "$RECORD.args"
 printf '%s\n' "${STATS_BROKER:-}" "${STATS_USERNAME:-}" "${STATS_PASSWORD:-}" "${STATS_DEVICE_ID:-}" > "$RECORD.env"
 EOF
+cat > "$tmp/bin/systemctl" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$RECORD.systemctl"
+case "$1" in
+    show)
+        if [ "${HEALTH_MODE:-healthy}" = crash ]; then
+            count=$(cat "$RECORD.restarts" 2>/dev/null || echo 0)
+            count=$((count + 1))
+            echo "$count" > "$RECORD.restarts"
+            echo "$count"
+        elif [ "${HEALTH_MODE:-healthy}" != unavailable ]; then echo 0; fi ;;
+    is-active) exit 0 ;;
+esac
+EOF
+cat > "$tmp/bin/journalctl" <<'EOF'
+#!/bin/sh
+case " $* " in
+    *' -n 10 '*) printf '%s\n' 'MQTT connection failed' 'Password: sandbox-secret' 'STATS_PASSWORD=sandbox-secret' ;;
+    *' -p err '*) if [ "${HEALTH_MODE:-healthy}" = journal-error ]; then echo 'MQTT connection failed'; fi ;;
+    *) case "${HEALTH_MODE:-healthy}" in journal-error|journal-stderr) echo 'MQTT broker rejected the client' ;; esac ;;
+esac
+EOF
+cat > "$tmp/bin/sleep" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
 chmod +x "$tmp/bin/"* "$tmp/fake-binary"
 PATH=$tmp/bin:$PATH
 FAKE_BINARY=$tmp/fake-binary
 RECORD=$tmp/record
 export PATH FAKE_BINARY RECORD
+STATS_SKIP_HEALTHCHECK=1; export STATS_SKIP_HEALTHCHECK
 unset STATS_BROKER STATS_USERNAME STATS_PASSWORD STATS_DEVICE_ID
 passed=0
 check() {
@@ -98,5 +125,36 @@ passed=$((passed + 1))
 case_name=password-argv
 if run --password unsafe-test-value; then echo 'FAIL: password argument accepted' >&2; exit 1; fi
 check grep -q STATS_PASSWORD "$tmp/output"
+passed=$((passed + 1))
+case_name=health-skipped
+unset CHECKSUM_EXIT
+rm -f "$RECORD.systemctl"
+run
+check test ! -e "$RECORD.systemctl"
+check test "$(grep -c 'stats-linux is running' "$tmp/output" || :)" = 0
+passed=$((passed + 1))
+STATS_SKIP_HEALTHCHECK=0
+case_name=healthy
+run
+check grep -q 'stats-linux is running' "$tmp/output"
+passed=$((passed + 1))
+case_name=health-restarts-unavailable
+HEALTH_MODE=unavailable run
+check grep -q 'stats-linux is running' "$tmp/output"
+passed=$((passed + 1))
+case_name=health-crash-loop
+if HEALTH_MODE=crash run; then echo 'FAIL: crash loop accepted' >&2; exit 1; fi
+check grep -q 'MQTT connection failed' "$tmp/output"
+check grep -q 'journalctl -u stats-linux' "$tmp/output"
+check grep -q '\[REDACTED\]' "$tmp/output"
+check test "$(grep -c 'sandbox-secret' "$tmp/output" || :)" = 0
+passed=$((passed + 1))
+case_name=health-journal-error
+if HEALTH_MODE=journal-error run; then echo 'FAIL: journal error accepted' >&2; exit 1; fi
+check grep -q 'MQTT connection failed' "$tmp/output"
+passed=$((passed + 1))
+case_name=health-journal-stderr
+if HEALTH_MODE=journal-stderr run; then echo 'FAIL: stderr refusal accepted' >&2; exit 1; fi
+check grep -q 'MQTT connection failed' "$tmp/output"
 passed=$((passed + 1))
 echo "install.sh: $passed cases passed, 0 failed"

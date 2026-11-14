@@ -18,6 +18,8 @@ curl -fsSL https://raw.githubusercontent.com/ronigooja/stats-linux/main/install.
 
 Inspect the script before executing it when required by your trust policy. The installer verifies the release SHA256, installs `/usr/local/bin/stats-linux`, creates root-owned `/etc/stats-linux/config` with mode `0600`, and enables/starts the systemd unit for boot autostart. Existing config skips all prompts and is preserved unless `install --force` is supplied. Passwords must use `STATS_PASSWORD`, never installer arguments.
 
+After installation, the script waits up to 20 seconds for eight seconds of active service without restarts and checks for error-level entries and failure messages in the journal since installation. Failure prints a password-masked journal tail and exits nonzero. For test sandboxes without real systemd, set `STATS_SKIP_HEALTHCHECK=1` to skip this check.
+
 Build with `go build -o stats-linux .`; test with `go test ./...` and `go vet ./...`. Release builds inject the version using `-ldflags "-X main.version=v1.2.3"`; otherwise `version` reports `dev`.
 
 When running the agent, precedence is flags > environment > `/etc/stats-linux/config` > defaults. No subcommand and `run` are equivalent. The config uses EnvironmentFile-style `KEY=VALUE` assignments, blank lines, and full-line `#`/`;` comments. Values may be unquoted, single-quoted, or double-quoted; quote values containing quotes/backslashes. Double quotes support escaped `"`, `\`, `$`, and backticks. Shell expansion, multiline values, and inline comments are not supported. systemd reads this root-only file before dropping privileges.
@@ -30,7 +32,7 @@ When running the agent, precedence is flags > environment > `/etc/stats-linux/co
 | `-password` | `STATS_PASSWORD` | empty | Broker password; prefer environment over a command-line flag |
 | `-ca-file` | `STATS_CA_FILE` | system roots | Additional PEM CA certificates |
 | `--disk-path` | `STATS_DISK_PATH` | auto | Comma-separated paths instead of automatic filesystem selection |
-| `--interval` | `STATS_INTERVAL` | `30s` | Go duration between samples, e.g. `30s`, `1m`; minimum `5s` |
+| `--interval` | `STATS_INTERVAL` | `1m` | Go duration between samples, e.g. `1m`; minimum `5s` |
 
 TLS certificate and hostname verification are mandatory. Protect environment files with restrictive permissions; environment variables can also be visible to privileged users. Never embed credentials in the broker URL. The broker must support MQTT 3.1.1 and allow retained QoS 1 publishes and a last will. Each agent needs a unique device ID.
 
@@ -46,6 +48,7 @@ When filesystems are counted, `metrics` also includes `disks`: an array of objec
 stats-linux version
 stats-linux update --check
 sudo stats-linux update
+sudo stats-linux restart
 sudo stats-linux uninstall          # preserves /etc/stats-linux
 sudo stats-linux uninstall --purge  # also removes configuration
 ```

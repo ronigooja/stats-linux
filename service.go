@@ -157,6 +157,13 @@ func (s system) uninstall(purge bool) error {
 	return s.run("daemon-reload")
 }
 
+func (s system) restart() error {
+	if err := s.requireRoot(); err != nil {
+		return err
+	}
+	return s.run("restart", "stats-linux")
+}
+
 func command(args []string) error {
 	name := "run"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -211,6 +218,18 @@ func command(args []string) error {
 			return errors.New("unexpected positional arguments")
 		}
 		return newUpdater(s).update(check, force)
+	case "restart":
+		if err := fs.Parse(args); err != nil {
+			return errors.New("invalid restart flags")
+		}
+		if fs.NArg() != 0 {
+			return errors.New("unexpected positional arguments")
+		}
+		if err := s.restart(); err != nil {
+			return err
+		}
+		fmt.Println("restarted")
+		return nil
 	case "uninstall":
 		fs.BoolVar(&purge, "purge", false, "also remove config directory")
 		if err := fs.Parse(args); err != nil {
@@ -221,6 +240,6 @@ func command(args []string) error {
 		}
 		return s.uninstall(purge)
 	default:
-		return errors.New("expected run, install, update, uninstall, or version")
+		return errors.New("expected run, install, update, restart, uninstall, or version")
 	}
 }

@@ -267,6 +267,28 @@ func TestInstallUninstall(t *testing.T) {
 	}
 }
 
+func TestRestart(t *testing.T) {
+	s, calls := fakeSystem(t)
+	if err := s.restart(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*calls, []string{"restart stats-linux"}) {
+		t.Fatalf("calls = %v", *calls)
+	}
+	s.uid = func() int { return 1000 }
+	if err := s.restart(); err == nil {
+		t.Fatal("non-root restart allowed")
+	}
+	if len(*calls) != 1 {
+		t.Fatal("non-root restart invoked runner")
+	}
+	s.uid = func() int { return 0 }
+	s.run = func(...string) error { return errors.New("restart failed") }
+	if err := s.restart(); err == nil {
+		t.Fatal("restart failure ignored")
+	}
+}
+
 func TestUpdateHTTP(t *testing.T) {
 	for _, tc := range []struct {
 		name, current                string

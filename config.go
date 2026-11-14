@@ -121,8 +121,8 @@ func configFlags(fs *flag.FlagSet, file map[string]string, lookup func(string) (
 	fs.StringVar(&c.caFile, "ca-file", get("STATS_CA_FILE", ""), "additional PEM CA certificates")
 	fs.StringVar(&c.diskPath, "disk-path", get("STATS_DISK_PATH", ""), "comma-separated filesystem paths (default: auto-detect)")
 	// Parse durations after flags so an explicit flag can override an invalid environment value.
-	interval := get("STATS_INTERVAL", "30s")
-	fs.Var(&durationValue{text: &interval}, "interval", "metrics interval (minimum 5s)")
+	interval := get("STATS_INTERVAL", "1m")
+	fs.Var(&durationValue{text: &interval}, "interval", "metrics interval (default 1m, minimum 5s)")
 	fs.SetOutput(io.Discard) // Flag defaults can contain credentials; never print them.
 	return c
 }
