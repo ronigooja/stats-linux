@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/disk"
 )
@@ -90,17 +91,56 @@ func aggregateDisks(targets []diskTarget, usage func(string) (*disk.UsageStat, e
 	return result, breakdown
 }
 
-func collectDisks(ctx context.Context, paths string) (capacity, []diskCapacity, error) {
-	partitions, err := disk.PartitionsWithContext(ctx, paths != "")
-	if err != nil {
-		return capacity{}, nil, err
+// diskTargetCache belongs to the single collection loop; it is not shared with callbacks.
+type diskTargetCache struct {
+	now        func() time.Time
+	partitions func(context.Context, bool) ([]disk.PartitionStat, error)
+	targets    []diskTarget
+	refreshed  time.Time
+	valid      bool
+}
+
+func (c *diskTargetCache) collect(ctx context.Context, paths string, usage func(string) (*disk.UsageStat, error), device func(string) (uint64, error)) (capacity, []diskCapacity, error) {
+	var targets []diskTarget
+	if strings.TrimSpace(paths) != "" {
+		// Explicit paths need no partition scan, and must not reuse automatic targets.
+		c.valid = false
+		targets = selectDisks(nil, paths)
+	} else {
+		now := c.now()
+		if !c.valid || now.Sub(c.refreshed) >= 5*time.Minute {
+			c.valid = false
+			partitions, err := c.partitions(ctx, false)
+			if err != nil {
+				return capacity{}, nil, err
+			}
+			c.targets = selectDisks(partitions, "")
+			c.refreshed, c.valid = now, true
+		}
+		targets = c.targets
 	}
-	total, breakdown := aggregateDisks(selectDisks(partitions, paths), func(path string) (*disk.UsageStat, error) {
+	total, breakdown := aggregateDisks(targets, func(path string) (*disk.UsageStat, error) {
+		u, err := usage(path)
+		if err != nil {
+			c.valid = false
+		}
+		return u, err
+	}, func(path string) (uint64, error) {
+		id, err := device(path)
+		if err != nil {
+			c.valid = false
+		}
+		return id, err
+	})
+	return total, breakdown, nil
+}
+
+func (c *diskTargetCache) collectDisks(ctx context.Context, paths string) (capacity, []diskCapacity, error) {
+	return c.collect(ctx, paths, func(path string) (*disk.UsageStat, error) {
 		return disk.UsageWithContext(ctx, path)
 	}, func(path string) (uint64, error) {
 		var stat syscall.Stat_t
 		err := syscall.Stat(path, &stat)
 		return uint64(stat.Dev), err
 	})
-	return total, breakdown, nil
 }

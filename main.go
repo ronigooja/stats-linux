@@ -15,6 +15,7 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -57,7 +58,7 @@ func networkRates(previous, current counters) rates {
 	}
 	return rates{float64(current.rx-previous.rx) / seconds, float64(current.tx-previous.tx) / seconds}
 }
-func collect(ctx context.Context, path string, previous counters) (metrics, counters, error) {
+func collect(ctx context.Context, path string, previous counters, disksCache *diskTargetCache) (metrics, counters, error) {
 	var m metrics
 	percent, err := cpu.PercentWithContext(ctx, 0, false)
 	if err != nil || len(percent) == 0 {
@@ -67,7 +68,7 @@ func collect(ctx context.Context, path string, previous counters) (metrics, coun
 	if err != nil {
 		return m, previous, fmt.Errorf("memory: %w", err)
 	}
-	d, disks, err := collectDisks(ctx, path)
+	d, disks, err := disksCache.collectDisks(ctx, path)
 	if err != nil {
 		return m, previous, fmt.Errorf("disk: %w", err)
 	}
@@ -185,6 +186,7 @@ func run(c config) error {
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 	var prev counters
+	disksCache := diskTargetCache{now: time.Now, partitions: disk.PartitionsWithContext}
 	for {
 		// Cancellation takes priority over queued reconnection notifications.
 		if ctx.Err() != nil {
@@ -200,7 +202,7 @@ func run(c config) error {
 		if ctx.Err() != nil {
 			return shutdown(client, base)
 		}
-		m, next, err := collect(ctx, c.diskPath, prev)
+		m, next, err := collect(ctx, c.diskPath, prev, &disksCache)
 		if err != nil {
 			log.Printf("collect metrics: %v", err)
 		} else {
