@@ -47,14 +47,31 @@ func TestDiskTargetCache(t *testing.T) {
 			{advance: 5 * time.Minute, scanError: true, scans: 3},
 			{scans: 4, mount: "/disk4"},
 		}},
-		{name: "explicit paths never scan and deduplicate devices", steps: []step{
-			{paths: "/explicit,/alias,/explicit", mount: "/explicit"},
-			{advance: 10 * time.Minute, paths: "/explicit,/alias", mount: "/explicit"},
+		{name: "explicit paths scan, reuse, expire, and deduplicate partition devices", steps: []step{
+			{paths: "/explicit/folder,/alias/folder", scans: 1, mount: "/explicit/folder"},
+			{advance: time.Minute, paths: "/explicit/folder,/alias/folder", scans: 1, mount: "/explicit/folder"},
+			{advance: 4 * time.Minute, paths: "/explicit/folder,/alias/folder", scans: 2, mount: "/explicit/folder"},
+		}},
+		{name: "changed explicit paths rescan", steps: []step{
+			{paths: "/explicit", scans: 1, mount: "/explicit"},
+			{paths: "/alias", scans: 2, mount: "/alias"},
+		}},
+		{name: "explicit usage failure invalidates", steps: []step{
+			{paths: "/explicit", scans: 1, usageError: true},
+			{paths: "/explicit", scans: 2, mount: "/explicit"},
+		}},
+		{name: "explicit device failure invalidates", steps: []step{
+			{paths: "/explicit", scans: 1, deviceError: true},
+			{paths: "/explicit", scans: 2, mount: "/explicit"},
+		}},
+		{name: "explicit scan error is not cached", steps: []step{
+			{paths: "/explicit", scans: 1, scanError: true},
+			{paths: "/explicit", scans: 2, mount: "/explicit"},
 		}},
 		{name: "explicit paths invalidate automatic cache", steps: []step{
 			{scans: 1, mount: "/disk1"},
-			{paths: "/explicit", scans: 1, mount: "/explicit"},
-			{scans: 2, mount: "/disk2"},
+			{paths: "/explicit", scans: 2, mount: "/explicit"},
+			{scans: 3, mount: "/disk3"},
 		}},
 		{name: "empty successful scan is cached", empty: true, steps: []step{
 			{scans: 1},
@@ -66,19 +83,27 @@ func TestDiskTargetCache(t *testing.T) {
 			now := time.Time{}
 			scans := 0
 			var scanError bool
+			var wantAll bool
 			failure := errors.New("filesystem unavailable")
 			cache := diskTargetCache{
 				now: func() time.Time { return now },
 				partitions: func(_ context.Context, all bool) ([]disk.PartitionStat, error) {
 					scans++
-					if all {
-						t.Error("automatic scan requested all filesystems")
+					if all != wantAll {
+						t.Errorf("partition scan all = %v, want %v", all, wantAll)
 					}
 					if scanError {
 						return nil, failure
 					}
 					if tc.empty {
 						return nil, nil
+					}
+					if all {
+						return []disk.PartitionStat{
+							{Device: "root", Mountpoint: "/", Fstype: "ext4"},
+							{Device: "shared", Mountpoint: "/explicit", Fstype: "btrfs"},
+							{Device: "shared", Mountpoint: "/alias", Fstype: "btrfs"},
+						}, nil
 					}
 					mount := fmt.Sprintf("/disk%d", scans)
 					return []disk.PartitionStat{
@@ -91,6 +116,7 @@ func TestDiskTargetCache(t *testing.T) {
 			for i, s := range tc.steps {
 				now = now.Add(s.advance)
 				scanError = s.scanError
+				wantAll = s.paths != ""
 				var usagePaths []string
 				used := uint64(i + 1)
 				total, entries, err := cache.collect(context.Background(), s.paths, func(path string) (*disk.UsageStat, error) {
@@ -99,9 +125,12 @@ func TestDiskTargetCache(t *testing.T) {
 						return nil, failure
 					}
 					return &disk.UsageStat{Used: used, Total: 100}, nil
-				}, func(string) (uint64, error) {
+				}, func(path string) (uint64, error) {
 					if s.deviceError {
 						return 0, failure
+					}
+					if path == "/alias" || path == "/alias/folder" {
+						return 2, nil
 					}
 					return 1, nil
 				})

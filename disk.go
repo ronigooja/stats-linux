@@ -98,28 +98,24 @@ type diskTargetCache struct {
 	targets    []diskTarget
 	refreshed  time.Time
 	valid      bool
+	paths      string
+	all        bool
 }
 
 func (c *diskTargetCache) collect(ctx context.Context, paths string, usage func(string) (*disk.UsageStat, error), device func(string) (uint64, error)) (capacity, []diskCapacity, error) {
-	var targets []diskTarget
-	if strings.TrimSpace(paths) != "" {
-		// Explicit paths need no partition scan, and must not reuse automatic targets.
+	all := paths != ""
+	now := c.now()
+	if !c.valid || c.paths != paths || c.all != all || now.Sub(c.refreshed) >= 5*time.Minute {
 		c.valid = false
-		targets = selectDisks(nil, paths)
-	} else {
-		now := c.now()
-		if !c.valid || now.Sub(c.refreshed) >= 5*time.Minute {
-			c.valid = false
-			partitions, err := c.partitions(ctx, false)
-			if err != nil {
-				return capacity{}, nil, err
-			}
-			c.targets = selectDisks(partitions, "")
-			c.refreshed, c.valid = now, true
+		partitions, err := c.partitions(ctx, all)
+		if err != nil {
+			return capacity{}, nil, err
 		}
-		targets = c.targets
+		c.targets = selectDisks(partitions, paths)
+		c.paths, c.all = paths, all
+		c.refreshed, c.valid = now, true
 	}
-	total, breakdown := aggregateDisks(targets, func(path string) (*disk.UsageStat, error) {
+	total, breakdown := aggregateDisks(c.targets, func(path string) (*disk.UsageStat, error) {
 		u, err := usage(path)
 		if err != nil {
 			c.valid = false
