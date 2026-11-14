@@ -22,12 +22,20 @@ type system struct {
 	uid        func() int
 	executable func() (string, error)
 	run        func(...string) error
+	runStatus  func(...string) error
 }
 
 func localSystem() system {
 	return system{uid: os.Geteuid, executable: os.Executable, run: func(args ...string) error {
 		if err := exec.Command("systemctl", args...).Run(); err != nil {
 			return fmt.Errorf("systemctl %s failed", strings.Join(args, " "))
+		}
+		return nil
+	}, runStatus: func(args ...string) error {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
 		}
 		return nil
 	}}
@@ -164,6 +172,10 @@ func (s system) restart() error {
 	return s.run("restart", "stats-linux")
 }
 
+func (s system) status() error {
+	return s.runStatus("status", "--no-pager", "--full", "stats-linux")
+}
+
 func command(args []string) error {
 	name := "run"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
@@ -204,7 +216,7 @@ func command(args []string) error {
 			if !force && file["STATS_DEVICE_ID"] != "" {
 				c.deviceID = file["STATS_DEVICE_ID"]
 			}
-			fmt.Printf("Installed stats-linux (device ID: %s)\nCheck status: systemctl status stats-linux\n", c.deviceID)
+			fmt.Printf("Installed stats-linux (device ID: %s)\nCheck status: stats-linux status\n", c.deviceID)
 			return nil
 		}
 		return run(*c)
@@ -218,12 +230,15 @@ func command(args []string) error {
 			return errors.New("unexpected positional arguments")
 		}
 		return newUpdater(s).update(check, force)
-	case "restart":
+	case "status", "restart":
 		if err := fs.Parse(args); err != nil {
-			return errors.New("invalid restart flags")
+			return fmt.Errorf("invalid %s flags", name)
 		}
 		if fs.NArg() != 0 {
 			return errors.New("unexpected positional arguments")
+		}
+		if name == "status" {
+			return s.status()
 		}
 		if err := s.restart(); err != nil {
 			return err
@@ -240,6 +255,6 @@ func command(args []string) error {
 		}
 		return s.uninstall(purge)
 	default:
-		return errors.New("expected run, install, update, restart, uninstall, or version")
+		return errors.New("expected run, install, update, status, restart, uninstall, or version")
 	}
 }

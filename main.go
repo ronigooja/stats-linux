@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -268,9 +269,21 @@ func run(c config) error {
 		}
 	}
 }
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	if err := command(os.Args[1:]); err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		os.Exit(exitCode(err))
 	}
 }

@@ -46,12 +46,15 @@ When filesystems are counted, `metrics` also includes `disks`: an array of objec
 
 ```sh
 stats-linux version
+stats-linux status                 # full systemd status; no sudo needed when permitted
 stats-linux update --check
 sudo stats-linux update
 sudo stats-linux restart
 sudo stats-linux uninstall          # preserves /etc/stats-linux
 sudo stats-linux uninstall --purge  # also removes configuration
 ```
+
+`status` runs `systemctl status --no-pager --full stats-linux`, streams its output and diagnostics, and preserves its exit code (for example, 3 for inactive or 4 for a missing unit). It does not read the root-only configuration or require root; systemd permissions still apply.
 
 Updates query the latest GitHub release, select the native amd64/arm64 asset, verify `sha256sums.txt`, and atomically replace the running binary before restarting an active service. Downgrades and updates from unknown (`dev`) versions require `--force`. A failed restart is reported, but does not roll back the binary. Checksums protect integrity, not authenticity against a compromised release account; downloads rely on HTTPS and GitHub trust.
 
