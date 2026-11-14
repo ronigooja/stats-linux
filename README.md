@@ -3,10 +3,20 @@
 Install on Linux amd64 or arm64 as root (requires curl, sha256sum, and systemd):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ronigooja/stats-linux/main/install.sh -o /tmp/install-stats-linux.sh && sudo sh /tmp/install-stats-linux.sh --broker ssl://broker.example:8883 --device-id my-host
+curl -fsSL https://raw.githubusercontent.com/ronigooja/stats-linux/main/install.sh | sudo sh
 ```
 
-For credentials, set `STATS_USERNAME` and `STATS_PASSWORD` in a root shell before running the installer; do not put passwords in shell arguments/history. Inspect the downloaded script before executing it. The installer verifies the release SHA256, installs `/usr/local/bin/stats-linux`, creates root-owned `/etc/stats-linux/config` with mode `0600`, and enables/starts the systemd unit for boot autostart. Existing config is preserved unless `install --force` is supplied.
+The installer prompts through the terminal for broker, username, and a hidden, nonempty password. Enter accepts `ssl://mqtt.z0e.dev:8883` only at the installer broker prompt; `run` still requires a configured broker. The device ID defaults to the hostname, sanitized to ASCII letters, digits, `-`, `_`, and `.`, trimmed of edge hyphens and limited to 64 characters. Machines with the same hostname must use different `--device-id` values.
+
+For non-interactive installation, supply credentials in the root environment (load `STATS_PASSWORD` from a protected secret source, not shell history):
+
+```sh
+# In a root shell with STATS_PASSWORD already set:
+export STATS_BROKER=ssl://broker.example:8883 STATS_USERNAME=my-user STATS_PASSWORD
+curl -fsSL https://raw.githubusercontent.com/ronigooja/stats-linux/main/install.sh | sh -s -- --device-id my-host
+```
+
+Inspect the script before executing it when required by your trust policy. The installer verifies the release SHA256, installs `/usr/local/bin/stats-linux`, creates root-owned `/etc/stats-linux/config` with mode `0600`, and enables/starts the systemd unit for boot autostart. Existing config skips all prompts and is preserved unless `install --force` is supplied. Passwords must use `STATS_PASSWORD`, never installer arguments.
 
 Build with `go build -o stats-linux .`; test with `go test ./...` and `go vet ./...`. Release builds inject the version using `-ldflags "-X main.version=v1.2.3"`; otherwise `version` reports `dev`.
 
@@ -15,7 +25,7 @@ When running the agent, precedence is flags > environment > `/etc/stats-linux/co
 | Flag | Environment | Default | Meaning |
 | --- | --- | --- | --- |
 | `-broker` | `STATS_BROKER` | required | TLS MQTT URL, e.g. `ssl://broker.example:8883` |
-| `-device-id` | `STATS_DEVICE_ID` | required | Unique topic segment and client ID suffix |
+| `-device-id` | `STATS_DEVICE_ID` | sanitized hostname | Unique topic segment and client ID suffix |
 | `-username` | `STATS_USERNAME` | empty | Broker username |
 | `-password` | `STATS_PASSWORD` | empty | Broker password; prefer environment over a command-line flag |
 | `-ca-file` | `STATS_CA_FILE` | system roots | Additional PEM CA certificates |

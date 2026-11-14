@@ -190,7 +190,15 @@ func command(args []string) error {
 			return err
 		}
 		if name == "install" {
-			return s.install(*c, force)
+			if err := s.install(*c, force); err != nil {
+				return err
+			}
+			// Report the persisted ID when an existing configuration was kept.
+			if !force && file["STATS_DEVICE_ID"] != "" {
+				c.deviceID = file["STATS_DEVICE_ID"]
+			}
+			fmt.Printf("Installed stats-linux (device ID: %s)\nCheck status: systemctl status stats-linux\n", c.deviceID)
+			return nil
 		}
 		return run(*c)
 	case "update":

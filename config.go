@@ -140,6 +140,27 @@ func (v *durationValue) String() string {
 func (v *durationValue) Set(s string) error { *v.text = s; return nil }
 
 func finishConfig(fs *flag.FlagSet, c *config) error {
+	return finishConfigWithHostname(fs, c, os.Hostname)
+}
+
+// sanitizeHostname applies only to an implicit device ID, not explicit IDs.
+func sanitizeHostname(hostname string) string {
+	var out strings.Builder
+	for _, c := range hostname {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' {
+			out.WriteRune(c)
+		} else {
+			out.WriteByte('-')
+		}
+	}
+	id := strings.Trim(out.String(), "-")
+	if len(id) > 64 {
+		id = strings.TrimRight(id[:64], "-")
+	}
+	return id
+}
+
+func finishConfigWithHostname(fs *flag.FlagSet, c *config, hostname func() (string, error)) error {
 	if fs.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
@@ -149,6 +170,16 @@ func finishConfig(fs *flag.FlagSet, c *config) error {
 		return errors.New("interval must be a Go duration such as 30s or 1m")
 	}
 	c.interval = d
+	if c.deviceID == "" {
+		host, err := hostname()
+		if err != nil {
+			return errors.New("cannot determine hostname; provide --device-id")
+		}
+		c.deviceID = sanitizeHostname(host)
+		if c.deviceID == "" {
+			return errors.New("hostname has no usable MQTT topic characters; provide --device-id")
+		}
+	}
 	return validateConfig(*c)
 }
 
