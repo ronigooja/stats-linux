@@ -32,12 +32,12 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$BUILD_KNOWN_HOSTS" > ~/.ssh/known_hosts
           remote="/tmp/stats-linux-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          trap 'ssh root@64.118.141.231 "rm -rf -- $remote"; rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts' EXIT
-          ssh root@64.118.141.231 "mkdir -p $remote"
-          rsync -a --delete --exclude=.git ./ "root@64.118.141.231:$remote/"
-          ssh root@64.118.141.231 "export PATH=/root/Agents/environment/go-1.26.0/bin:\$PATH; cd $remote; set -eu; mkdir -p dist; for arch in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=\$arch go build -trimpath -ldflags '-s -w -X main.version=$GITHUB_REF_NAME' -o dist/stats-linux_linux_\$arch .; done; cd dist; sha256sum stats-linux_linux_* > sha256sums.txt" > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
+          trap 'ssh root@38.47.101.8 "rm -rf -- $remote"; rm -f ~/.ssh/id_ed25519 ~/.ssh/known_hosts' EXIT
+          ssh root@38.47.101.8 "mkdir -p $remote"
+          tar --exclude=.git -czf - . | ssh root@38.47.101.8 "tar -xzf - -C $remote"
+          ssh root@38.47.101.8 "export PATH=/root/Agents/environment/go/bin:\$PATH; cd $remote; set -eu; mkdir -p dist; for arch in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=\$arch go build -trimpath -ldflags '-s -w -X main.version=$GITHUB_REF_NAME' -o dist/stats-linux_linux_\$arch .; done; cd dist; sha256sum stats-linux_linux_* > sha256sums.txt" > "$RUNNER_TEMP/build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/build.log"; exit 1; }
           mkdir -p dist
-          rsync -a "root@64.118.141.231:$remote/dist/" dist/
+          scp "root@38.47.101.8:$remote/dist/stats-linux_linux_amd64" "root@38.47.101.8:$remote/dist/stats-linux_linux_arm64" "root@38.47.101.8:$remote/dist/sha256sums.txt" dist/
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
