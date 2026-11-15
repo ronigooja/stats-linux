@@ -1,0 +1,155 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/netip"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	publicIPEndpoint = "https://api64.ipify.org"
+	publicIPRefresh  = 30 * time.Minute
+	publicIPRetry    = 5 * time.Minute
+	publicIPTimeout  = 5 * time.Second
+	publicIPMaxBytes = 128
+)
+
+// These special-use ranges are not public egress addresses, even where Go's
+// IsGlobalUnicast permits them. IPv6 is additionally restricted to 2000::/3.
+var nonPublicIPRanges = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
+}
+
+var publicIPv6Range = netip.MustParsePrefix("2000::/3")
+
+func parsePublicIP(body string) (string, error) {
+	ip, err := netip.ParseAddr(strings.TrimSpace(body))
+	if err != nil || ip.Zone() != "" {
+		return "", errors.New("invalid public IP response")
+	}
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || (ip.Is6() && !publicIPv6Range.Contains(ip)) {
+		return "", errors.New("nonpublic IP response")
+	}
+	for _, prefix := range nonPublicIPRanges {
+		if prefix.Contains(ip) {
+			return "", errors.New("nonpublic IP response")
+		}
+	}
+	return ip.String(), nil
+}
+
+func publicIPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil // Report direct egress, never an environment HTTP proxy.
+	return &http.Client{
+		Transport: transport,
+		Timeout:   publicIPTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func lookupPublicIP(ctx context.Context, client *http.Client, endpoint string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, publicIPTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.New("public IP request failed")
+	}
+	// Read one extra byte to reject, rather than silently truncate, large bodies.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, publicIPMaxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > publicIPMaxBytes {
+		return "", errors.New("public IP response too large")
+	}
+	return parsePublicIP(string(body))
+}
+
+type publicIPCache struct {
+	mu     sync.RWMutex
+	ip     string
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func startPublicIP(parent context.Context) *publicIPCache {
+	ctx, cancel := context.WithCancel(parent)
+	c := &publicIPCache{cancel: cancel, done: make(chan struct{})}
+	client := publicIPClient()
+	go func() {
+		defer close(c.done)
+		defer client.CloseIdleConnections()
+		c.run(ctx, func(ctx context.Context) (string, error) {
+			return lookupPublicIP(ctx, client, publicIPEndpoint)
+		}, waitPublicIP)
+	}()
+	return c
+}
+
+func (c *publicIPCache) close() {
+	c.cancel()
+	<-c.done
+}
+
+func (c *publicIPCache) value() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ip
+}
+
+// run owns lookups; metrics only read the cache and never initiate network work.
+func (c *publicIPCache) run(ctx context.Context, lookup func(context.Context) (string, error), wait func(context.Context, time.Duration) bool) {
+	for ctx.Err() == nil {
+		ip, err := lookup(ctx)
+		delay := publicIPRetry
+		if err == nil {
+			c.mu.Lock()
+			c.ip = ip
+			c.mu.Unlock()
+			delay = publicIPRefresh
+		}
+		if !wait(ctx, delay) {
+			return
+		}
+	}
+}
+
+func waitPublicIP(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}

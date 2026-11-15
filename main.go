@@ -47,6 +47,7 @@ type metrics struct {
 	Network   rates          `json:"network"`
 	Load      float64        `json:"load_1m"`
 	Uptime    uint64         `json:"uptime_seconds"`
+	PublicIP  string         `json:"public_ip,omitempty"`
 }
 type counters struct {
 	rx, tx uint64
@@ -88,7 +89,7 @@ func collect(ctx context.Context, path string, previous counters, disksCache *di
 	}
 	now := time.Now().UTC()
 	current := counters{n[0].BytesRecv, n[0].BytesSent, now}
-	m = metrics{1, now, percent[0], capacity{vm.Used, vm.Total}, d, disks, networkRates(previous, current), l.Load1, u}
+	m = metrics{Version: 1, Timestamp: now, CPU: percent[0], Memory: capacity{vm.Used, vm.Total}, Disk: d, Disks: disks, Network: networkRates(previous, current), Load: l.Load1, Uptime: u}
 	return m, current, nil
 }
 
@@ -263,6 +264,8 @@ func run(c config) error {
 	base := "stats/v1/machines/" + c.deviceID + "/"
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	publicIP := startPublicIP(ctx)
+	defer publicIP.close()
 	connected := make(chan struct{}, 1)
 	// Paho v1.5.0 hides initial CONNACK errors with ConnectRetry enabled.
 	// Retry initial network failures ourselves; retain automatic reconnect after success.
@@ -303,6 +306,7 @@ func run(c config) error {
 			log.Printf("collect metrics: %v", err)
 		} else {
 			prev = next
+			m.PublicIP = publicIP.value()
 			if client.IsConnectionOpen() {
 				if err := publish(client, base+"metrics", m); err != nil {
 					return fmt.Errorf("publish metrics: %w", err)

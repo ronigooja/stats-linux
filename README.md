@@ -44,6 +44,8 @@ When a publish fails or its acknowledgement times out, the agent exits instead o
 
 When filesystems are counted, `metrics` also includes `disks`: an array of objects containing only `mount`, `used_bytes`, and `total_bytes`, from the same collection pass as `disk`. Entries are sorted by mount path and limited to the first 32; `disk` still sums all counted filesystems. With `--disk-path`, `mount` contains the selected explicit path after device deduplication. When no filesystems are counted, `disks` is omitted. Mount paths are published to the MQTT broker, so broker readers can see them.
 
+When a public IP lookup succeeds, `metrics` includes optional `public_ip` (a single IPv4 or IPv6 string). An independent background worker queries `https://api64.ipify.org` at startup, then 30 minutes after each success or 5 minutes after failure, with a 5-second timeout, no redirects, and no environment HTTP proxy. Unknown addresses are omitted; transient failures retain the last known address. Lookups never delay collection or MQTT startup. The endpoint sees the request's source IP (no MQTT credentials or metrics are sent), and MQTT readers can see the cached address. This is the endpoint-visible NAT/VPN egress address, not necessarily a host address, inbound-reachable address, or the route used to reach the MQTT broker.
+
 ```sh
 stats-linux version
 stats-linux status                 # full systemd status; no sudo needed when permitted
