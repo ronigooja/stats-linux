@@ -267,8 +267,8 @@ func TestPublicIPCacheSchedule(t *testing.T) {
 	c := &publicIPCache{}
 	calls := 0
 	waits := 0
-	wantIPs := []string{"", "8.8.8.8", "8.8.8.8", "1.1.1.1"}
-	wantDelays := []time.Duration{5 * time.Minute, 30 * time.Minute, 5 * time.Minute, 30 * time.Minute}
+	wantIPs := []string{"", "8.8.8.8", "", "1.1.1.1"}
+	wantDelays := []time.Duration{30 * time.Minute, 30 * time.Minute, 30 * time.Minute, 30 * time.Minute}
 	c.run(context.Background(), func(context.Context) (string, error) {
 		calls++
 		switch calls {

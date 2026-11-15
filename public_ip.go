@@ -16,7 +16,6 @@ const (
 	publicIPv4Endpoint = "https://api.ipify.org"
 	publicIPv6Endpoint = "https://api6.ipify.org"
 	publicIPRefresh    = 30 * time.Minute
-	publicIPRetry      = 5 * time.Minute
 	publicIPTimeout    = 5 * time.Second
 	publicIPMaxBytes   = 128
 )
@@ -144,14 +143,13 @@ func (c *publicIPCache) value() string {
 func (c *publicIPCache) run(ctx context.Context, lookup func(context.Context) (string, error), wait func(context.Context, time.Duration) bool) {
 	for ctx.Err() == nil {
 		ip, err := lookup(ctx)
-		delay := publicIPRetry
-		if err == nil {
-			c.mu.Lock()
-			c.ip = ip
-			c.mu.Unlock()
-			delay = publicIPRefresh
+		if err != nil {
+			ip = ""
 		}
-		if !wait(ctx, delay) {
+		c.mu.Lock()
+		c.ip = ip
+		c.mu.Unlock()
+		if !wait(ctx, publicIPRefresh) {
 			return
 		}
 	}
