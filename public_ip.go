@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -12,11 +13,12 @@ import (
 )
 
 const (
-	publicIPEndpoint = "https://api64.ipify.org"
-	publicIPRefresh  = 30 * time.Minute
-	publicIPRetry    = 5 * time.Minute
-	publicIPTimeout  = 5 * time.Second
-	publicIPMaxBytes = 128
+	publicIPv4Endpoint = "https://api.ipify.org"
+	publicIPv6Endpoint = "https://api6.ipify.org"
+	publicIPRefresh    = 30 * time.Minute
+	publicIPRetry      = 5 * time.Minute
+	publicIPTimeout    = 5 * time.Second
+	publicIPMaxBytes   = 128
 )
 
 // These special-use ranges are not public egress addresses, even where Go's
@@ -56,9 +58,13 @@ func parsePublicIP(body string) (string, error) {
 	return ip.String(), nil
 }
 
-func publicIPClient() *http.Client {
+func publicIPClient(network string) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // Report direct egress, never an environment HTTP proxy.
+	dialer := &net.Dialer{Timeout: publicIPTimeout, KeepAlive: 30 * time.Second}
+	transport.DialContext = func(ctx context.Context, _ string, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, address)
+	}
 	return &http.Client{
 		Transport: transport,
 		Timeout:   publicIPTimeout,
@@ -68,7 +74,7 @@ func publicIPClient() *http.Client {
 	}
 }
 
-func lookupPublicIP(ctx context.Context, client *http.Client, endpoint string) (string, error) {
+func lookupPublicIP(ctx context.Context, client *http.Client, endpoint, network string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, publicIPTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -91,7 +97,15 @@ func lookupPublicIP(ctx context.Context, client *http.Client, endpoint string) (
 	if len(body) > publicIPMaxBytes {
 		return "", errors.New("public IP response too large")
 	}
-	return parsePublicIP(string(body))
+	ip, err := parsePublicIP(string(body))
+	if err != nil {
+		return "", err
+	}
+	address := netip.MustParseAddr(ip)
+	if (network != "tcp4" && network != "tcp6") || address.Is4() != (network == "tcp4") {
+		return "", errors.New("public IP response has wrong address family")
+	}
+	return ip, nil
 }
 
 type publicIPCache struct {
@@ -101,15 +115,15 @@ type publicIPCache struct {
 	done   chan struct{}
 }
 
-func startPublicIP(parent context.Context) *publicIPCache {
+func startPublicIP(parent context.Context, endpoint, network string) *publicIPCache {
 	ctx, cancel := context.WithCancel(parent)
 	c := &publicIPCache{cancel: cancel, done: make(chan struct{})}
-	client := publicIPClient()
+	client := publicIPClient(network)
 	go func() {
 		defer close(c.done)
 		defer client.CloseIdleConnections()
 		c.run(ctx, func(ctx context.Context) (string, error) {
-			return lookupPublicIP(ctx, client, publicIPEndpoint)
+			return lookupPublicIP(ctx, client, endpoint, network)
 		}, waitPublicIP)
 	}()
 	return c

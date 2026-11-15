@@ -38,16 +38,17 @@ type rates struct {
 	TX float64 `json:"tx_bytes_per_second"`
 }
 type metrics struct {
-	Version   int            `json:"version"`
-	Timestamp time.Time      `json:"timestamp"`
-	CPU       float64        `json:"cpu_percent"`
-	Memory    capacity       `json:"memory"`
-	Disk      capacity       `json:"disk"`
-	Disks     []diskCapacity `json:"disks,omitempty"`
-	Network   rates          `json:"network"`
-	Load      float64        `json:"load_1m"`
-	Uptime    uint64         `json:"uptime_seconds"`
-	PublicIP  string         `json:"public_ip,omitempty"`
+	Version    int            `json:"version"`
+	Timestamp  time.Time      `json:"timestamp"`
+	CPU        float64        `json:"cpu_percent"`
+	Memory     capacity       `json:"memory"`
+	Disk       capacity       `json:"disk"`
+	Disks      []diskCapacity `json:"disks,omitempty"`
+	Network    rates          `json:"network"`
+	Load       float64        `json:"load_1m"`
+	Uptime     uint64         `json:"uptime_seconds"`
+	PublicIPv4 string         `json:"public_ipv4,omitempty"`
+	PublicIPv6 string         `json:"public_ipv6,omitempty"`
 }
 type counters struct {
 	rx, tx uint64
@@ -264,8 +265,10 @@ func run(c config) error {
 	base := "stats/v1/machines/" + c.deviceID + "/"
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	publicIP := startPublicIP(ctx)
-	defer publicIP.close()
+	publicIPv4 := startPublicIP(ctx, publicIPv4Endpoint, "tcp4")
+	defer publicIPv4.close()
+	publicIPv6 := startPublicIP(ctx, publicIPv6Endpoint, "tcp6")
+	defer publicIPv6.close()
 	connected := make(chan struct{}, 1)
 	// Paho v1.5.0 hides initial CONNACK errors with ConnectRetry enabled.
 	// Retry initial network failures ourselves; retain automatic reconnect after success.
@@ -306,7 +309,8 @@ func run(c config) error {
 			log.Printf("collect metrics: %v", err)
 		} else {
 			prev = next
-			m.PublicIP = publicIP.value()
+			m.PublicIPv4 = publicIPv4.value()
+			m.PublicIPv6 = publicIPv6.value()
 			if client.IsConnectionOpen() {
 				if err := publish(client, base+"metrics", m); err != nil {
 					return fmt.Errorf("publish metrics: %w", err)

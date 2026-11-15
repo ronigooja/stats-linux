@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,16 +42,20 @@ func TestParsePublicIP(t *testing.T) {
 func TestLookupPublicIPResponses(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, want string
+		network          string
 		status           int
 	}{
-		{"ipv4", "8.8.8.8\n", "8.8.8.8", 200},
-		{"ipv6", "2606:4700:4700::1111", "2606:4700:4700::1111", 200},
-		{"maximum", "8.8.8.8" + strings.Repeat(" ", publicIPMaxBytes-7), "8.8.8.8", 200},
-		{"oversized", "8.8.8.8" + strings.Repeat(" ", publicIPMaxBytes-6), "", 200},
-		{"invalid", "hello", "", 200},
-		{"private", "10.0.0.1", "", 200},
-		{"empty", "", "", 200},
-		{"status", "8.8.8.8", "", 503},
+		{"ipv4", "8.8.8.8\n", "8.8.8.8", "tcp4", 200},
+		{"ipv6", "2606:4700:4700::1111", "2606:4700:4700::1111", "tcp6", 200},
+		{"ipv4-rejects-ipv6", "2606:4700:4700::1111", "", "tcp4", 200},
+		{"ipv6-rejects-ipv4", "8.8.8.8", "", "tcp6", 200},
+		{"ipv6-rejects-mapped-ipv4", "::ffff:8.8.8.8", "", "tcp6", 200},
+		{"maximum", "8.8.8.8" + strings.Repeat(" ", publicIPMaxBytes-7), "8.8.8.8", "tcp4", 200},
+		{"oversized", "8.8.8.8" + strings.Repeat(" ", publicIPMaxBytes-6), "", "tcp4", 200},
+		{"invalid", "hello", "", "tcp4", 200},
+		{"private", "10.0.0.1", "", "tcp4", 200},
+		{"empty", "", "", "tcp4", 200},
+		{"status", "8.8.8.8", "", "tcp4", 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,9 +66,9 @@ func TestLookupPublicIPResponses(t *testing.T) {
 				io.WriteString(w, tc.body)
 			}))
 			defer s.Close()
-			client := publicIPClient()
+			client := publicIPClient("tcp4") // Local server is IPv4; response family is checked separately.
 			defer client.CloseIdleConnections()
-			got, err := lookupPublicIP(context.Background(), client, s.URL)
+			got, err := lookupPublicIP(context.Background(), client, s.URL, tc.network)
 			if got != tc.want || (err == nil) != (tc.want != "") {
 				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
 			}
@@ -84,15 +89,15 @@ func TestPublicIPClientPolicy(t *testing.T) {
 	defer s.Close()
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-	client := publicIPClient()
+	client := publicIPClient("tcp4")
 	defer client.CloseIdleConnections()
 	if client.Timeout != 5*time.Second || client.Transport.(*http.Transport).Proxy != nil {
 		t.Fatal("incorrect timeout or proxy policy")
 	}
-	if _, err := lookupPublicIP(context.Background(), client, s.URL); err == nil || redirected.Load() != 0 {
+	if _, err := lookupPublicIP(context.Background(), client, s.URL, "tcp4"); err == nil || redirected.Load() != 0 {
 		t.Fatalf("redirect followed: count=%d, err=%v", redirected.Load(), err)
 	}
-	if publicIPEndpoint != "https://api64.ipify.org" {
+	if publicIPv4Endpoint != "https://api.ipify.org" || publicIPv6Endpoint != "https://api6.ipify.org" {
 		t.Fatal("unexpected endpoint")
 	}
 }
@@ -110,14 +115,14 @@ func TestLookupPublicIPTimeoutAndCancel(t *testing.T) {
 			defer s.Close()
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			client := publicIPClient()
+			client := publicIPClient("tcp4")
 			defer client.CloseIdleConnections()
 			if mode == "timeout" {
 				client.Timeout = 50 * time.Millisecond
 			}
 			done := make(chan error, 1)
 			go func() {
-				_, err := lookupPublicIP(ctx, client, s.URL)
+				_, err := lookupPublicIP(ctx, client, s.URL, "tcp4")
 				done <- err
 			}()
 			select {
@@ -145,6 +150,90 @@ func TestLookupPublicIPTimeoutAndCancel(t *testing.T) {
 	}
 }
 
+func TestPublicIPClientDialFamily(t *testing.T) {
+	for _, tc := range []struct{ network, address, other string }{
+		{"tcp4", "127.0.0.1:0", "[::1]:80"},
+		{"tcp6", "[::1]:0", "127.0.0.1:80"},
+	} {
+		t.Run(tc.network, func(t *testing.T) {
+			client := publicIPClient(tc.network)
+			defer client.CloseIdleConnections()
+			transport := client.Transport.(*http.Transport)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			// Even a caller requesting the opposite family cannot override the policy.
+			otherNetwork := "tcp6"
+			if tc.network == "tcp6" {
+				otherNetwork = "tcp4"
+			}
+			if conn, err := transport.DialContext(ctx, otherNetwork, tc.other); err == nil {
+				conn.Close()
+				t.Fatal("dial accepted the opposite address family")
+			}
+			listener, err := net.Listen(tc.network, tc.address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			conn, err := transport.DialContext(ctx, otherNetwork, listener.Addr().String())
+			if err != nil {
+				t.Fatalf("forced-family dial failed: %v", err)
+			}
+			conn.Close()
+			accepted, err := listener.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted.Close()
+			if client.Timeout != publicIPTimeout || transport.Proxy != nil || client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+				t.Fatal("incorrect timeout, proxy, or redirect policy")
+			}
+		})
+	}
+}
+
+func TestPublicIPCachesIndependent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ipv4, ipv6 publicIPCache
+	started, updated := make(chan struct{}), make(chan struct{})
+	done4, done6 := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done4)
+		ipv4.run(ctx, func(ctx context.Context) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		}, waitPublicIP)
+	}()
+	<-started
+	go func() {
+		defer close(done6)
+		ipv6.run(ctx, func(context.Context) (string, error) {
+			return "2606:4700:4700::1111", nil
+		}, func(ctx context.Context, delay time.Duration) bool {
+			close(updated)
+			return waitPublicIP(ctx, delay)
+		})
+	}()
+	select {
+	case <-updated:
+		if ipv4.value() != "" || ipv6.value() != "2606:4700:4700::1111" {
+			t.Fatal("one family blocked or overwrote the other cache")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("IPv6 lookup blocked on IPv4")
+	}
+	cancel()
+	for _, done := range []chan struct{}{done4, done6} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("worker did not exit after lifecycle cancellation")
+		}
+	}
+}
+
 type publicIPRoundTrip func(*http.Request) (*http.Response, error)
 
 func (f publicIPRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -163,13 +252,13 @@ func TestLookupPublicIPErrors(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: body, Header: make(http.Header)}, nil
 	})}
-	if _, err := lookupPublicIP(context.Background(), client, publicIPEndpoint); !errors.Is(err, io.ErrUnexpectedEOF) || !body.closed {
+	if _, err := lookupPublicIP(context.Background(), client, publicIPv4Endpoint, "tcp4"); !errors.Is(err, io.ErrUnexpectedEOF) || !body.closed {
 		t.Fatalf("body error=%v, closed=%v", err, body.closed)
 	}
 	client.Transport = publicIPRoundTrip(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("network unavailable")
 	})
-	if _, err := lookupPublicIP(context.Background(), client, publicIPEndpoint); err == nil {
+	if _, err := lookupPublicIP(context.Background(), client, publicIPv4Endpoint, "tcp4"); err == nil {
 		t.Fatal("network error ignored")
 	}
 }
@@ -245,13 +334,15 @@ func TestPublicIPCacheDoesNotBlockReaders(t *testing.T) {
 		return "", nil
 	}, waitPublicIP)
 	// Starting and closing with an already-canceled lifecycle makes no request.
-	worker := startPublicIP(ctx)
-	worker.close()
+	for _, network := range []string{"tcp4", "tcp6"} {
+		worker := startPublicIP(ctx, publicIPv4Endpoint, network)
+		worker.close()
+	}
 }
 
 func TestPublicIPMetricsJSONCompatibility(t *testing.T) {
-	for _, ip := range []string{"", "8.8.8.8", "2606:4700:4700::1111"} {
-		encoded, err := json.Marshal(metrics{Version: 1, PublicIP: ip})
+	for _, ips := range [][2]string{{}, {"8.8.8.8", ""}, {"", "2606:4700:4700::1111"}, {"8.8.8.8", "2606:4700:4700::1111"}} {
+		encoded, err := json.Marshal(metrics{Version: 1, PublicIPv4: ips[0], PublicIPv6: ips[1]})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,12 +350,17 @@ func TestPublicIPMetricsJSONCompatibility(t *testing.T) {
 		if err := json.Unmarshal(encoded, &object); err != nil {
 			t.Fatal(err)
 		}
-		field, exists := object["public_ip"]
-		if exists != (ip != "") {
-			t.Fatalf("incorrect optional field: %s", encoded)
+		if _, exists := object["public_ip"]; exists {
+			t.Fatalf("unreleased single-address field remains: %s", encoded)
 		}
-		if exists && string(field) != `"`+ip+`"` {
-			t.Fatalf("not an IP string: %s", field)
+		for i, name := range []string{"public_ipv4", "public_ipv6"} {
+			field, exists := object[name]
+			if exists != (ips[i] != "") {
+				t.Fatalf("incorrect optional field %s: %s", name, encoded)
+			}
+			if exists && string(field) != `"`+ips[i]+`"` {
+				t.Fatalf("not an IP string: %s", field)
+			}
 		}
 		// A legacy consumer ignores the additive field without a schema bump.
 		var legacy struct {
@@ -275,7 +371,7 @@ func TestPublicIPMetricsJSONCompatibility(t *testing.T) {
 		}
 	}
 	var decoded metrics
-	if err := json.Unmarshal([]byte(`{"version":1,"cpu_percent":12.5}`), &decoded); err != nil || decoded.PublicIP != "" || decoded.CPU != 12.5 {
+	if err := json.Unmarshal([]byte(`{"version":1,"cpu_percent":12.5}`), &decoded); err != nil || decoded.PublicIPv4 != "" || decoded.PublicIPv6 != "" || decoded.CPU != 12.5 {
 		t.Fatalf("old payload decoding failed: %+v, %v", decoded, err)
 	}
 }
