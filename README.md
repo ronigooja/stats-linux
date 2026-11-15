@@ -50,9 +50,12 @@ stats-linux status                 # full systemd status; no sudo needed when pe
 stats-linux update --check
 sudo stats-linux update
 sudo stats-linux restart
-sudo stats-linux uninstall          # preserves /etc/stats-linux
-sudo stats-linux uninstall --purge  # also removes configuration
+sudo stats-linux uninstall               # prompts to delete configuration (default yes)
+sudo stats-linux uninstall --purge       # deletes configuration without asking
+sudo stats-linux uninstall --keep-config # keeps configuration without asking
 ```
+
+Uninstall reads the installed config, stops/disables the service, and deletes retained MQTT `info`, `metrics`, and `status` topics before removing local files. `--keep-remote` skips MQTT cleanup. Missing/invalid config or broker failures print a manual-cleanup warning but do not block local removal. Without a terminal, config is kept unless `--purge` is supplied; `--purge` and `--keep-config` are mutually exclusive. EOF or an unrecognized prompt answer also keeps config. Use `stats-linux --help` or `<subcommand> -h` for credential-safe flag descriptions.
 
 `status` runs `systemctl status --no-pager --full stats-linux`, streams its output and diagnostics, and preserves its exit code (for example, 3 for inactive or 4 for a missing unit). It does not read the root-only configuration or require root; systemd permissions still apply.
 

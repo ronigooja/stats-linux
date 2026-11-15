@@ -189,21 +189,68 @@ func connectInitial(ctx context.Context, connect func() mqtt.Token, timeout, ret
 	}
 }
 
-func run(c config) error {
+func brokerTLS(c config) (*tls.Config, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if c.caFile != "" {
 		pem, err := os.ReadFile(c.caFile)
 		if err != nil {
-			return fmt.Errorf("read CA: %w", err)
+			return nil, fmt.Errorf("read CA: %w", err)
 		}
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {
 			pool = x509.NewCertPool()
 		}
 		if !pool.AppendCertsFromPEM(pem) {
-			return errors.New("CA file contains no certificates")
+			return nil, errors.New("CA file contains no certificates")
 		}
 		tlsConfig.RootCAs = pool
+	}
+	return tlsConfig, nil
+}
+
+// clearRetained applies only to uninstall: empty bytes delete retained records,
+// unlike publish's JSON encoding of nil ("null").
+func clearRetained(client publisher, deviceID string) error {
+	for _, suffix := range []string{"info", "metrics", "status"} {
+		if !client.IsConnectionOpen() {
+			return errOffline
+		}
+		token := client.Publish("stats/v1/machines/"+deviceID+"/"+suffix, 1, true, []byte{})
+		if !token.WaitTimeout(10 * time.Second) {
+			return errors.New("cleanup publish timed out")
+		}
+		if err := token.Error(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clearRemote(c config) error {
+	tlsConfig, err := brokerTLS(c)
+	if err != nil {
+		return err
+	}
+	opts := mqtt.NewClientOptions().AddBroker(c.broker).SetProtocolVersion(4).
+		SetClientID("stats-" + c.deviceID + "-cleanup").SetUsername(c.username).SetPassword(c.password).
+		SetTLSConfig(tlsConfig).SetAutoReconnect(false).SetConnectRetry(false).
+		SetConnectTimeout(10 * time.Second).SetWriteTimeout(5 * time.Second)
+	client := mqtt.NewClient(opts)
+	defer client.Disconnect(250)
+	token := client.Connect()
+	if !token.WaitTimeout(10 * time.Second) {
+		return errors.New("cleanup connection timed out")
+	}
+	if err := token.Error(); err != nil {
+		return err
+	}
+	return clearRetained(client, c.deviceID)
+}
+
+func run(c config) error {
+	tlsConfig, err := brokerTLS(c)
+	if err != nil {
+		return err
 	}
 	name, err := os.Hostname()
 	if err != nil {

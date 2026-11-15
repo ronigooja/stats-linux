@@ -209,7 +209,7 @@ func fakeSystem(t *testing.T) (system, *[]string) {
 		t.Fatal(err)
 	}
 	var calls []string
-	return system{root: root, uid: func() int { return 0 }, executable: func() (string, error) { return binary, nil }, run: func(args ...string) error { calls = append(calls, strings.Join(args, " ")); return nil }}, &calls
+	return system{root: root, uid: func() int { return 0 }, executable: func() (string, error) { return binary, nil }, clearRemote: func(config) error { return nil }, output: io.Discard, warnings: io.Discard, run: func(args ...string) error { calls = append(calls, strings.Join(args, " ")); return nil }}, &calls
 }
 
 func TestInstallUninstall(t *testing.T) {
@@ -246,23 +246,23 @@ func TestInstallUninstall(t *testing.T) {
 			t.Fatal("credential in command")
 		}
 	}
-	if err := s.uninstall(false); err != nil {
+	if err := s.uninstall(uninstallOptions{keepConfig: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(s.path(configPath)); err != nil {
 		t.Fatal("removed config")
 	}
-	if err := s.uninstall(true); err != nil {
+	if err := s.uninstall(uninstallOptions{purge: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.uninstall(true); err != nil {
+	if err := s.uninstall(uninstallOptions{purge: true}); err != nil {
 		t.Fatal(err)
 	}
 	s.uid = func() int { return 1000 }
 	if err := s.install(c, false); err == nil {
 		t.Fatal("non-root install allowed")
 	}
-	if err := s.uninstall(false); err == nil {
+	if err := s.uninstall(uninstallOptions{}); err == nil {
 		t.Fatal("non-root uninstall allowed")
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	_ "embed"
 	"errors"
 	"flag"
@@ -18,27 +19,36 @@ var serviceUnit []byte
 var version = "dev"
 
 type system struct {
-	root       string
-	uid        func() int
-	executable func() (string, error)
-	run        func(...string) error
-	runStatus  func(...string) error
+	root        string
+	uid         func() int
+	executable  func() (string, error)
+	run         func(...string) error
+	runStatus   func(...string) error
+	clearRemote func(config) error
+	input       io.Reader
+	output      io.Writer
+	warnings    io.Writer
+	terminal    func() bool
 }
 
 func localSystem() system {
-	return system{uid: os.Geteuid, executable: os.Executable, run: func(args ...string) error {
-		if err := exec.Command("systemctl", args...).Run(); err != nil {
-			return fmt.Errorf("systemctl %s failed", strings.Join(args, " "))
-		}
-		return nil
-	}, runStatus: func(args ...string) error {
-		cmd := exec.Command("systemctl", args...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
-		}
-		return nil
-	}}
+	return system{uid: os.Geteuid, executable: os.Executable, clearRemote: clearRemote,
+		input: os.Stdin, output: os.Stdout, warnings: os.Stderr, terminal: func() bool {
+			info, err := os.Stdin.Stat()
+			return err == nil && info.Mode()&os.ModeCharDevice != 0
+		}, run: func(args ...string) error {
+			if err := exec.Command("systemctl", args...).Run(); err != nil {
+				return fmt.Errorf("systemctl %s failed", strings.Join(args, " "))
+			}
+			return nil
+		}, runStatus: func(args ...string) error {
+			cmd := exec.Command("systemctl", args...)
+			cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("systemctl %s: %w", strings.Join(args, " "), err)
+			}
+			return nil
+		}}
 }
 
 func (s system) path(path string) string { return filepath.Join(s.root, path) }
@@ -141,9 +151,60 @@ func removeIfPresent(path string) error {
 	return nil
 }
 
-func (s system) uninstall(purge bool) error {
+type uninstallOptions struct {
+	purge, keepConfig, keepRemote bool
+}
+
+func (s system) deleteConfig(options uninstallOptions) bool {
+	if options.purge {
+		return true
+	}
+	if options.keepConfig {
+		return false
+	}
+	if s.terminal == nil || !s.terminal() {
+		fmt.Fprintln(s.output, "Keeping configuration /etc/stats-linux (stdin is not a terminal; use --purge to delete).")
+		return false
+	}
+	fmt.Fprint(s.output, "Delete configuration /etc/stats-linux? [Y/n] ")
+	line, err := bufio.NewReader(s.input).ReadString('\n')
+	if err != nil && (err != io.EOF || strings.TrimSpace(line) == "") {
+		fmt.Fprintln(s.output, "Keeping configuration (no answer received).")
+		return false
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "" || answer == "y" || answer == "yes"
+}
+
+func (s system) uninstall(options uninstallOptions) error {
+	if options.purge && options.keepConfig {
+		return errors.New("--purge and --keep-config are mutually exclusive")
+	}
 	if err := s.requireRoot(); err != nil {
 		return err
+	}
+	var c *config
+	var remoteErr error
+	if !options.keepRemote {
+		// Check existence explicitly: run permits a missing file, uninstall cannot
+		// safely infer which installed machine to remove from the broker.
+		_, remoteErr = os.Stat(s.path(configPath))
+		if remoteErr == nil {
+			var file map[string]string
+			file, remoteErr = loadEnvironment(s.path(configPath))
+			if remoteErr == nil {
+				fs := flag.NewFlagSet("cleanup", flag.ContinueOnError)
+				c = configFlags(fs, file, func(string) (string, bool) { return "", false })
+				remoteErr = finishConfig(fs, c)
+			}
+		}
+		// Never include errors or config values: broker errors may contain secrets.
+		defer func() {
+			if remoteErr != nil {
+				fmt.Fprintln(s.warnings, "Warning: MQTT cleanup failed or configuration was unavailable/invalid; the machine may still appear in the Mac app. Clear each retained topic manually:")
+				fmt.Fprintln(s.warnings, "mosquitto_pub -h <host> -p <port> -u <user> -P <password> --capath /etc/ssl/certs -t stats/v1/machines/<device-id>/<info|metrics|status> -r -n")
+			}
+		}()
 	}
 	unit := s.path("/etc/systemd/system/stats-linux.service")
 	// A missing unit is normal when uninstalling again. Still stop any loaded unit.
@@ -151,13 +212,20 @@ func (s system) uninstall(purge bool) error {
 	if _, err := os.Stat(unit); err == nil && stopErr != nil {
 		return stopErr
 	}
+	if !options.keepRemote && remoteErr == nil {
+		if stopErr != nil {
+			remoteErr = stopErr // Do not clear while a loaded service might publish.
+		} else {
+			remoteErr = s.clearRemote(*c)
+		}
+	}
 	if err := removeIfPresent(unit); err != nil {
 		return err
 	}
 	if err := removeIfPresent(s.path("/usr/local/bin/stats-linux")); err != nil {
 		return err
 	}
-	if purge {
+	if s.deleteConfig(options) {
 		if err := os.RemoveAll(s.path("/etc/stats-linux")); err != nil {
 			return err
 		}
@@ -181,6 +249,11 @@ func command(args []string) error {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		name, args = args[0], args[1:]
 	}
+	if (name == "run" && len(args) == 1 && (args[0] == "-h" || args[0] == "--help")) || name == "help" ||
+		(knownCommand(name) && len(args) == 1 && (args[0] == "-h" || args[0] == "--help")) {
+		printUsage(os.Stdout)
+		return nil
+	}
 	if name == "version" {
 		fmt.Println(version)
 		return nil
@@ -188,7 +261,7 @@ func command(args []string) error {
 	s := localSystem()
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	force, check, purge := false, false, false
+	force, check := false, false
 	switch name {
 	case "run", "install":
 		if name == "install" {
@@ -246,15 +319,50 @@ func command(args []string) error {
 		fmt.Println("restarted")
 		return nil
 	case "uninstall":
-		fs.BoolVar(&purge, "purge", false, "also remove config directory")
+		options := uninstallOptions{}
+		fs.BoolVar(&options.purge, "purge", false, "remove config without asking")
+		fs.BoolVar(&options.keepConfig, "keep-config", false, "keep config without asking")
+		fs.BoolVar(&options.keepRemote, "keep-remote", false, "skip MQTT cleanup")
 		if err := fs.Parse(args); err != nil {
 			return errors.New("invalid uninstall flags")
 		}
 		if fs.NArg() != 0 {
 			return errors.New("unexpected positional arguments")
 		}
-		return s.uninstall(purge)
+		return s.uninstall(options)
 	default:
 		return errors.New("expected run, install, update, status, restart, uninstall, or version")
 	}
+}
+
+func knownCommand(name string) bool {
+	switch name {
+	case "run", "install", "update", "status", "restart", "uninstall", "version":
+		return true
+	}
+	return false
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, `Usage: stats-linux [subcommand] [flags]
+Subcommands:
+  run        Publish metrics (also used when no subcommand is given)
+  install    Install and start the service; --force overwrites configuration
+  update     Update the binary; --check reports versions, --force permits downgrade
+  status     Show systemd service status
+  restart    Restart the service
+  uninstall  Stop and remove the service and clear retained MQTT topics
+             --purge deletes configuration without asking
+             --keep-config keeps configuration without asking
+             --keep-remote skips MQTT cleanup
+  version    Print the version
+Run and install flags:
+  --broker     MQTT TLS broker URL
+  --device-id  Unique MQTT topic segment
+  --username   MQTT username
+  --password   MQTT password (prefer environment)
+  --ca-file    Additional PEM CA certificates
+  --disk-path  Comma-separated filesystem paths
+  --interval   Metrics collection interval
+Help: -h, --help, help, or <subcommand> -h`)
 }
